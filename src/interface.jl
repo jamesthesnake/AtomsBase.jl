@@ -1,123 +1,250 @@
+import Base.position
+import PeriodicTable
 using Unitful
 using UnitfulAtomic
 using PeriodicTable
+using StaticArrays
 
-export AbstractElement, AbstractParticle, AbstractAtom, AbstractSystem
-export Element
+export AbstractElement, AbstractParticle, AbstractAtom, AbstractSystem, AbstractAtomicSystem
+export ChemicalElement
 export BoundaryCondition, DirichletZero, Periodic
-export get_atomic_mass, get_atomic_number, get_atomic_symbol,
-    get_box, get_element, get_position, get_velocity,
-    get_boundary_conditions, get_periodic
-export get_atomic_property, has_atomic_property, atomic_propertynames
+export atomic_mass, atomic_number, atomic_symbol,
+    bounding_box, element, position, position_list, 
+    velocity, velocity_list, boundary_conditions, periodic_dims
+export atomic_property, has_atomic_property, atomic_propertynames
 export n_dimensions
 
 
 abstract type AbstractElement end
-struct Element <: AbstractElement
+struct ChemicalElement <: AbstractElement
     data::PeriodicTable.Element
 end
-Element(symbol::Union{Symbol,Integer,AbstractString}) = Element(PeriodicTable.elements[symbol])
-Base.show(io::IO, elem::Element) = print(io, "Element(", get_atomic_symbol(elem), ")")
 
-# These are always only read-only ... and allow look-up into a database
-get_atomic_symbol(el::Element) = el.data.symbol
-get_atomic_number(el::Element) = el.data.number
-get_atomic_mass(el::Element)   = el.data.atomic_mass
-
-
-
-#
-# A distinguishable particle, can be anything associated with coordinate
-# information (position, velocity, etc.)
-# most importantly: Can have any identifier type
-#
-# IdType:  Type used to identify the particle
-#
-abstract type AbstractParticle end
-get_velocity(::AbstractParticle)::AbstractVector{<: Unitful.Velocity} = missing
-get_position(::AbstractParticle)::AbstractVector{<: Unitful.Length}   = error("Implement me")
-get_element(::AbstractParticle)::AbstractElement = error("Implement me")
-
-
-#
-# The atom type itself
-#     - The atom interface is read-only (to allow as simple as possible implementation)
-#       Writability may be supported in derived or concrete types.
-#     - The inferface is only in Cartesian coordinates.
-#     - Has atom-specific defaults (i.e. assumes every entity represents an atom or ion)
-#
-abstract type AbstractAtom <: AbstractParticle end
-get_element(::AbstractAtom)::Element = error("Implement me")
-
-
-# Extracting things ... it might make sense to make some of them writable in concrete
-# implementations, therefore these interfaces are forwarded from the Element object.
-get_atomic_symbol(atom::AbstractAtom) = get_atomic_symbol(get_element(atom))
-get_atomic_number(atom::AbstractAtom) = get_atomic_number(get_element(atom))
-get_atomic_mass(atom::AbstractAtom)   = get_atomic_mass(get_element(atom))
-
-# Custom atomic properties:
-get_atomic_property(::AbstractAtom, ::Symbol, default=missing) = default
-has_atomic_property(atom::AbstractAtom, property::Symbol) = !ismissing(get_atomic_property(atom, property))
-atomic_propertynames(::AbstractAtom) = Symbol[]
+export BoundaryCondition, DirichletZero, Periodic, infinite_box, isinfinite
+export bounding_box, boundary_conditions, periodicity, n_dimensions, species_type
+export position, velocity, element, atomic_mass, atomic_number, atomic_symbol
+export atomkeys, hasatomkey
 
 #
 # Identifier for boundary conditions per dimension
 #
 abstract type BoundaryCondition end
 struct DirichletZero <: BoundaryCondition end  # Dirichlet zero boundary (i.e. molecular context)
-struct Periodic      <: BoundaryCondition end  # Periodic BCs
+struct Periodic <: BoundaryCondition end  # Periodic BCs
+
+infinite_box(::Val{1}) = [[Inf]]u"bohr"
+infinite_box(::Val{2}) = [[Inf, 0], [0, Inf]]u"bohr"
+infinite_box(::Val{3}) = [[Inf, 0, 0], [0, Inf, 0], [0, 0, Inf]]u"bohr"
+infinite_box(dim::Int) = infinite_box(Val(dim))
 
 
 #
-# The system type
-#     Again readonly.
+# Abstract system
 #
-abstract type AbstractSystem{AT <: AbstractParticle} <: AbstractVector{AT} end
-get_box(::AbstractSystem)::Vector{<:AbstractVector} = error("Implement me")
-get_boundary_conditions(::AbstractSystem)::AbstractVector{BoundaryCondition} = error("Implement me")
-get_periodic(sys::AbstractSystem) = [isa(bc, Periodic) for bc in get_boundary_conditions(sys)]
+"""
+    AbstractSystem{D}
 
-# Note: Can't use ndims, because that is ndims(sys) == 1 (because of AbstractVector interface)
-n_dimensions(sys::AbstractSystem) = length(get_boundary_conditions(sys))
+A `D`-dimensional system.
+"""
+abstract type AbstractSystem{D} end
 
-Base.getindex(::AbstractSystem{AT}, I)::AT  = error("Implement me") # for single indices
-Base.getindex(::AbstractSystem, ::T)::AbstractSystem where {T<:Union{AbstractArray, Colon}} = error("Implement me") # for slicing
-Base.size(::AbstractSystem)             = error("Implement me")
-Base.setindex!(::AbstractSystem, ::Int) = error("AbstractSystem objects are not mutable.")
+"""
+    bounding_box(sys::AbstractSystem{D})
+
+Return a vector of length `D` of vectors of length `D` that describe the "box" in which the system `sys` is defined.
+"""
+function bounding_box end
+
+"""
+    boundary_conditions(sys::AbstractSystem{D})
+
+Return a vector of length `D` of `BoundaryCondition` objects, one for each direction described by `bounding_box(sys)`.
+"""
+function boundary_conditions end
+
+"""
+    species_type(::AbstractSystem)
+
+Return the type used to represent a species or atom.
+"""
+function species_type end
+
+"""Return vector indicating whether the system is periodic along a dimension."""
+periodicity(sys::AbstractSystem) = [isa(bc, Periodic) for bc in boundary_conditions(sys)]
+
+"""Returns true if the given system is infinite"""
+isinfinite(sys::AbstractSystem{D}) where {D} = bounding_box(sys) == infinite_box(D)
+
+
+"""
+    n_dimensions(::AbstractSystem)
+    n_dimensions(atom)
+
+Return number of dimensions.
+"""
+n_dimensions(::AbstractSystem{D}) where {D} = D
+# Note: Can't use ndims, because that is ndims(sys) == 1 (because of indexing interface)
+
+# indexing and iteration interface...need to implement getindex and length, here are default dispatches for others
+Base.size(s::AbstractSystem) = (length(s),)
+Base.firstindex(::AbstractSystem) = 1
+Base.lastindex(s::AbstractSystem) = length(s)
+# default to 1D indexing
+Base.iterate(sys::AbstractSystem, state = firstindex(sys)) =
+    (firstindex(sys) <= state <= length(sys)) ? (@inbounds sys[state], state + 1) : nothing
+Base.eltype(sys::AbstractSystem) = species_type(sys)
+Base.getindex(s::AbstractSystem, i::AbstractArray) = getindex.(Ref(s), i)
+Base.getindex(s::AbstractSystem, ::Colon) = collect(s)
+function Base.getindex(s::AbstractSystem, r::AbstractVector{Bool})
+    s[ (firstindex(s):lastindex(s))[r] ]
+end
 
 # TODO Support similar, push, ...
+
 
 # Some implementations might prefer to store data in the System as a flat list and
 # expose Atoms as a view. Therefore these functions are needed. Of course this code
 # should be autogenerated later on ...
-get_position(sys::AbstractSystem) = get_position.(sys)    # in Cartesian coordinates!
-get_velocity(sys::AbstractSystem) = get_velocity.(sys)    # in Cartesian coordinates!
-get_element(sys::AbstractSystem)  = get_element.(sys)
+position_list(sys::AbstractSystem) = position.(sys)    # in Cartesian coordinates!
+position(sys::AbstractSystem, index) = position_list(sys)[index]
+velocity_list(sys::AbstractSystem) = velocity.(sys)    # in Cartesian coordinates!
+velocity(sys::AbstractSystem, index) = velocity_list(sys)[index]
+element_list(sys::AbstractSystem)  = element.(sys)
+element(sys::AbstractSystem, index) = element_list(sys)[index]
 
 #
-# Extra stuff only for Systems composed of atoms
+# Species property accessors from systems and species
 #
-get_atomic_symbol(sys::AbstractSystem{<: AbstractAtom}) = get_atomic_symbol.(sys)
-get_atomic_number(sys::AbstractSystem{<: AbstractAtom}) = get_atomic_number.(sys)
-get_atomic_mass(sys::AbstractSystem{<: AbstractAtom})   = get_atomic_mass.(sys)
-get_atomic_property(sys::AbstractSystem{<: AbstractAtom}, property::Symbol)::Vector{Any} = get_atomic_property.(sys, property)
-atomic_propertiesnames(sys::AbstractSystem{<: AbstractAtom}) = unique(sort(atomic_propertynames.(sys)))
+
+"""The element corresponding to a species/atom (or missing)."""
+element(id::Union{Symbol,Integer}) = PeriodicTable.elements[id]  # Keep for better inlining
+function element(name::AbstractString)
+    try
+        return PeriodicTable.elements[name]
+    catch e
+        if e isa KeyError
+            throw(ArgumentError(
+                "Unknown element name: $name. " *
+                "Note that AtomsBase uses PeriodicTables to resolve element identifiers, " *
+                "where strings are considered element names. To lookup an element by " *
+                "element symbol use `Symbol`s instead, e.g. "*
+                """`Atom(Symbol("Si"), zeros(3)u"Å")` or `Atom("silicon", zeros(3)u"Å")`."""
+            ))
+        else
+            rethrow()
+        end
+    end
+const AbstractAtomicSystem{D,AT<:AbstractAtom} = AbstractSystem{D,ChemicalElement,AT}
+atomic_symbol_list(sys::AbstractAtomicSystem) = atomic_symbol.(sys)
+atomic_symbol(sys::AbstractSystem, index) = atomic_symbol_list(sys)[index]
+atomic_number_list(sys::AbstractAtomicSystem) = atomic_number.(sys)
+atomic_number(sys::AbstractSystem, index) = atomic_number_list(sys)[index]
+atomic_mass_list(sys::AbstractAtomicSystem)   = atomic_mass.(sys)
+atomic_mass(sys::AbstractSystem, index) = atomic_mass_list(sys)[index]
+
+# I'm concerned about ambiguity between these two function names...TBD
+atomic_property_list(sys::AbstractAtomicSystem, property::Symbol)::Vector{Any} = atomic_property.(sys, property)
+atomic_propertyname_list(sys::AbstractAtomicSystem) = unique(sort(atomic_propertynames.(sys)))
 
 # Just to make testing a little easier for now
 function Base.show(io::IO, ::MIME"text/plain", part::AbstractParticle)
-    print(io, "Particle(", get_element(part), ") @ ", get_position(part))
+    print(io, "Particle(", element(part), ") @ ", position(part))
 end
-function Base.show(io::IO, ::MIME"text/plain", part::AbstractAtom)
-    print(io, "Atom(", get_atomic_symbol(part), ") @ ", get_position(part))
+
+
+"""
+    position(sys::AbstractSystem{D})
+    position(sys::AbstractSystem, index)
+    position(species)
+
+Return a vector of positions of every particle in the system `sys`. Return type
+should be a vector of vectors each containing `D` elements that are
+`<:Unitful.Length`. If an index is passed or the action is on a `species`,
+return only the position of the referenced `species` / species on that index.
+"""
+position(sys::AbstractSystem)        = position.(sys)    # in Cartesian coordinates!
+position(sys::AbstractSystem, index) = position(sys[index])
+
+
+"""
+    velocity(sys::AbstractSystem{D})
+    velocity(sys::AbstractSystem, index)
+    velocity(species)
+
+Return a vector of velocities of every particle in the system `sys`. Return
+type should be a vector of vectors each containing `D` elements that are
+`<:Unitful.Velocity`. If an index is passed or the action is on a `species`,
+return only the velocity of the referenced `species`. Returned value of the function
+may be `missing`.
+"""
+velocity(sys::AbstractSystem)        = velocity.(sys)    # in Cartesian coordinates!
+velocity(sys::AbstractSystem, index) = velocity(sys[index])
+
+
+"""
+    atomic_mass(sys::AbstractSystem)
+    atomic_mass(sys::AbstractSystem, i)
+    atomic_mass(species)
+
+Vector of atomic masses in the system `sys` or the atomic mass of a particular `species` /
+the `i`th species in `sys`. The elements are `<: Unitful.Mass`.
+"""
+atomic_mass(sys::AbstractSystem)        = atomic_mass.(sys)
+atomic_mass(sys::AbstractSystem, index) = atomic_mass(sys[index])
+
+
+"""
+    atomic_symbol(sys::AbstractSystem)
+    atomic_symbol(sys::AbstractSystem, i)
+    atomic_symbol(species)
+
+Vector of atomic symbols in the system `sys` or the atomic symbol of a particular `species` /
+the `i`th species in `sys`.
+
+The intention is that [`atomic_number`](@ref) carries the meaning
+of identifying the type of a `species` (e.g. the element for the case of an atom), whereas
+[`atomic_symbol`](@ref) may return a more unique identifier. For example for a deuterium atom
+this may be `:D` while `atomic_number` is still `1`.
+"""
+atomic_symbol(sys::AbstractSystem)        = atomic_symbol.(sys)
+atomic_symbol(sys::AbstractSystem, index) = atomic_symbol(sys[index])
+
+
+"""
+    atomic_number(sys::AbstractSystem)
+    atomic_number(sys::AbstractSystem, i)
+    atomic_number(species)
+
+Vector of atomic numbers in the system `sys` or the atomic number of a particular `species` /
+the `i`th species in `sys`.
+
+The intention is that [`atomic_number`](@ref) carries the meaning
+of identifying the type of a `species` (e.g. the element for the case of an atom), whereas
+[`atomic_symbol`](@ref) may return a more unique identifier. For example for a deuterium atom
+this may be `:D` while `atomic_number` is still `1`.
+"""
+atomic_number(sys::AbstractSystem)        = atomic_number.(sys)
+atomic_number(sys::AbstractSystem, index) = atomic_number(sys[index])
+
+"""
+    atomkeys(sys::AbstractSystem)
+
+Return the atomic properties, which are available in all atoms of the system.
+"""
+function atomkeys(system::AbstractSystem)
+    atkeys = length(system) == 0 ? () : keys(system[1])
+    filter(k -> hasatomkey(system, k), atkeys)
 end
-function Base.show(io::IO, mime::MIME"text/plain", sys::AbstractSystem)
-    println(io, "System:")
-    println(io, "    BCs:        ", get_boundary_conditions(sys))
-    println(io, "    Box:        ", get_box(sys))
-    println(io, "    Particles:  ")
-    for particle in sys
-        Base.show(io, mime, particle)
-        println(io)
-    end
+
+"""
+    hasatomkey(system::AbstractSystem, x::Symbol)
+
+Returns true whether the passed property available in all atoms of the passed system.
+"""
+hasatomkey(system::AbstractSystem, x::Symbol) = all(at -> haskey(at, x), system)
+
+# Defaults for system
+Base.pairs(system::AbstractSystem) = (k => system[k] for k in keys(system))
+function Base.get(system::AbstractSystem, x::Symbol, default)
+    haskey(system, x) ? getindex(system, x) : default
 end
